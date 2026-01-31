@@ -1,7 +1,7 @@
 use anyhow::Result;
 use scrap::{Capturer, Display};
 use std::io::ErrorKind;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::models::FrameData;
 
@@ -42,12 +42,17 @@ impl ScreenCapture {
                 // Encode as JPEG for compression
                 let image_data = encode_jpeg(&rgb_data, self.width, self.height)?;
 
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
                 Ok(Some(FrameData {
                     image_data,
                     width: self.width,
                     height: self.height,
                     format: "jpeg".to_string(),
-                    timestamp: Instant::now().elapsed().as_millis() as i64,
+                    timestamp,
                 }))
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),

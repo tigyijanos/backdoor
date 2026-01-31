@@ -122,10 +122,11 @@ The server can be configured via `appsettings.json`:
 
 ## Security Considerations
 
-- Passwords are hashed (SHA256) before transmission
-- All communication is via WebSocket (supports WSS for encryption)
+- Passwords are hashed server-side using BCrypt (secure adaptive hashing)
+- All communication is via WebSocket (supports WSS for encryption in production)
 - Client IDs are random GUIDs
-- No data is stored on the relay server (stateless)
+- No persistent data is stored on the relay server (stateless)
+- CORS is configurable for production environments
 
 ## Development
 

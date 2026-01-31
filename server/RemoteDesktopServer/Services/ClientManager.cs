@@ -1,7 +1,5 @@
 using RemoteDesktopServer.Models;
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace RemoteDesktopServer.Services;
 
@@ -83,7 +81,7 @@ public class ClientManager : IClientManager
         var client = GetClientByClientId(clientId);
         if (client == null) return false;
         if (client.PasswordHash == null) return true; // No password set
-        return client.PasswordHash == HashPassword(password);
+        return VerifyPassword(password, client.PasswordHash);
     }
 
     public void UpdateHeartbeat(string connectionId)
@@ -125,8 +123,11 @@ public class ClientManager : IClientManager
 
     private static string HashPassword(string password)
     {
-        using var sha256 = SHA256.Create();
-        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
-        return Convert.ToBase64String(bytes);
+        return BCrypt.Net.BCrypt.HashPassword(password);
+    }
+
+    private static bool VerifyPassword(string password, string hash)
+    {
+        return BCrypt.Net.BCrypt.Verify(password, hash);
     }
 }
