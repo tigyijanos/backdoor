@@ -1,0 +1,55 @@
+[package]
+name = "remote_desktop_client"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform remote desktop client"
+authors = ["Remote Desktop Team"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# HTTP/WebSocket
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID for client ID
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Screen capture
+scrap = "0.5"
+
+# Image encoding
+image = "0.24"
+
+# GUI
+eframe = "0.24"
+egui = "0.24"
+
+# Config/storage
+directories = "5.0"
+confy = "0.5"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Input handling
+enigo = "0.1"
+
+# Time
+chrono = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
