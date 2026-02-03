@@ -45,14 +45,11 @@ thiserror = "1.0"
 # Input handling
 enigo = "0.1"
 
+# Clipboard
+arboard = "3.2"
+
 # Time
 chrono = "0.4"
-
-# Cryptography
-sha2 = "0.10"
-
-# File dialogs
-rfd = "0.12"
 
 [profile.release]
 lto = true

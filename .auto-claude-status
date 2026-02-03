@@ -1,25 +1,25 @@
 {
   "active": true,
-  "spec": "003-file-transfer",
+  "spec": "004-clipboard-synchronization",
   "state": "building",
   "subtasks": {
-    "completed": 12,
-    "total": 13,
+    "completed": 9,
+    "total": 10,
     "in_progress": 1,
     "failed": 0
   },
   "phase": {
-    "current": "Integration & Testing",
+    "current": "Integration - End-to-End Testing",
     "id": null,
-    "total": 4
+    "total": 1
   },
   "workers": {
     "active": 0,
     "max": 1
   },
   "session": {
-    "number": 14,
-    "started_at": "2026-02-03T14:56:09.128232"
+    "number": 140,
+    "started_at": "2026-02-03T16:28:15.257997"
   },
-  "last_update": "2026-02-03T15:41:20.592971"
+  "last_update": "2026-02-03T17:11:33.694476"
 }

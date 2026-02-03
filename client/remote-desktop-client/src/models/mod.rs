@@ -8,6 +8,12 @@ pub struct ClientConfig {
     pub server_url: String,
     pub connection_history: Vec<ConnectionHistoryEntry>,
     pub reconnection_config: ReconnectionConfig,
+    #[serde(default = "default_clipboard_sync_enabled")]
+    pub clipboard_sync_enabled: bool,
+}
+
+fn default_clipboard_sync_enabled() -> bool {
+    true
 }
 
 impl Default for ClientConfig {
@@ -18,6 +24,7 @@ impl Default for ClientConfig {
             server_url: "http://localhost:5000".to_string(),
             connection_history: Vec::new(),
             reconnection_config: ReconnectionConfig::default(),
+            clipboard_sync_enabled: true,
         }
     }
 }
@@ -85,6 +92,24 @@ pub enum InputType {
     KeyUp = 5,
 }
 
+/// Clipboard data for synchronization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardData {
+    #[serde(rename = "type")]
+    pub clipboard_type: ClipboardType,
+    #[serde(rename = "textData")]
+    pub text_data: String,
+    #[serde(rename = "imageData")]
+    pub image_data: Vec<u8>,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum ClipboardType {
+    Text = 0,
+    Image = 1,
+}
+
 /// Connection state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -117,30 +142,4 @@ impl Default for AppState {
             reconnection_attempt: 0,
         }
     }
-}
-
-/// File transfer metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileTransferData {
-    #[serde(rename = "transferId")]
-    pub transfer_id: String,
-    #[serde(rename = "filename")]
-    pub filename: String,
-    #[serde(rename = "fileSize")]
-    pub file_size: i64,
-    #[serde(rename = "totalChunks")]
-    pub total_chunks: i32,
-}
-
-/// File chunk data for transfer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChunk {
-    #[serde(rename = "transferId")]
-    pub transfer_id: String,
-    #[serde(rename = "chunkIndex")]
-    pub chunk_index: i32,
-    #[serde(rename = "data")]
-    pub data: Vec<u8>,
-    #[serde(rename = "checksum")]
-    pub checksum: String,
 }

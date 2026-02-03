@@ -167,6 +167,21 @@ public class RemoteDesktopHub : Hub
     }
 
     /// <summary>
+    /// Send clipboard data to connected peer
+    /// </summary>
+    public async Task SendClipboard(ClipboardData clipboardData)
+    {
+        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
+        if (sender?.ConnectedToClientId == null) return;
+
+        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
+        if (peer != null)
+        {
+            await Clients.Client(peer.ConnectionId).SendAsync("ReceiveClipboard", clipboardData);
+        }
+    }
+
+    /// <summary>
     /// Check if a client is online
     /// </summary>
     public Task<bool> GetClientStatus(string clientId)
@@ -198,85 +213,6 @@ public class RemoteDesktopHub : Hub
                 await Clients.Client(peer.ConnectionId).SendAsync("PeerDisconnected");
             }
             _clientManager.ClearConnection(client.ClientId);
-        }
-    }
-
-    /// <summary>
-    /// Initiate a file transfer to connected peer
-    /// </summary>
-    public async Task InitiateFileTransfer(FileTransferData transferData)
-    {
-        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
-        if (sender?.ConnectedToClientId == null) return;
-
-        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
-        if (peer != null)
-        {
-            _logger.LogInformation("File transfer initiated: {TransferId} - {Filename} ({FileSize} bytes)",
-                transferData.TransferId, transferData.Filename, transferData.FileSize);
-            await Clients.Client(peer.ConnectionId).SendAsync("ReceiveFileTransferRequest", transferData);
-        }
-    }
-
-    /// <summary>
-    /// Send a file chunk to connected peer
-    /// </summary>
-    public async Task SendFileChunk(FileChunk chunk)
-    {
-        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
-        if (sender?.ConnectedToClientId == null) return;
-
-        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
-        if (peer != null)
-        {
-            await Clients.Client(peer.ConnectionId).SendAsync("ReceiveFileChunk", chunk);
-        }
-    }
-
-    /// <summary>
-    /// Acknowledge receipt of a file chunk
-    /// </summary>
-    public async Task AcknowledgeChunk(string transferId, int chunkIndex)
-    {
-        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
-        if (sender?.ConnectedToClientId == null) return;
-
-        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
-        if (peer != null)
-        {
-            await Clients.Client(peer.ConnectionId).SendAsync("ChunkAcknowledged", transferId, chunkIndex);
-        }
-    }
-
-    /// <summary>
-    /// Mark file transfer as complete
-    /// </summary>
-    public async Task CompleteFileTransfer(string transferId)
-    {
-        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
-        if (sender?.ConnectedToClientId == null) return;
-
-        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
-        if (peer != null)
-        {
-            _logger.LogInformation("File transfer completed: {TransferId}", transferId);
-            await Clients.Client(peer.ConnectionId).SendAsync("FileTransferCompleted", transferId);
-        }
-    }
-
-    /// <summary>
-    /// Cancel an ongoing file transfer
-    /// </summary>
-    public async Task CancelFileTransfer(string transferId)
-    {
-        var sender = _clientManager.GetClientByConnectionId(Context.ConnectionId);
-        if (sender?.ConnectedToClientId == null) return;
-
-        var peer = _clientManager.GetClientByClientId(sender.ConnectedToClientId);
-        if (peer != null)
-        {
-            _logger.LogInformation("File transfer cancelled: {TransferId}", transferId);
-            await Clients.Client(peer.ConnectionId).SendAsync("FileTransferCancelled", transferId);
         }
     }
 }
