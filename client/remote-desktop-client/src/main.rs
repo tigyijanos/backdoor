@@ -51,6 +51,7 @@ struct RemoteDesktopApp {
 
     // File transfer
     file_transfer_manager: Option<FileTransferManager>,
+    pending_file_transfer: Option<models::FileTransferData>,
 
     // Settings panel
     show_settings: bool,
@@ -80,6 +81,7 @@ impl RemoteDesktopApp {
             remote_frame: None,
             frame_data: None,
             file_transfer_manager: None,
+            pending_file_transfer: None,
             show_settings: false,
             show_connection_details: false,
             show_file_transfer: false,
@@ -415,11 +417,85 @@ impl RemoteDesktopApp {
                         let _ = handler.process_input(&input);
                     });
                 }
+                ServerMessage::InitiateFileTransfer(file_transfer) => {
+                    self.pending_file_transfer = Some(file_transfer);
+                }
                 ServerMessage::Error(err) => {
                     self.state.error_message = Some(err);
                 }
             }
         }
+    }
+
+    fn accept_file_transfer(&mut self, file_transfer: &models::FileTransferData) {
+        // Show save file dialog
+        let default_filename = file_transfer.filename.clone();
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_filename)
+            .save_file()
+        {
+            // Get the parent directory and filename from the selected path
+            let parent_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+                directories::UserDirs::new()
+                    .and_then(|dirs| dirs.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("downloads"))
+            });
+
+            let chosen_filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&default_filename)
+                .to_string();
+
+            // Initialize file transfer manager with the chosen directory
+            match FileTransferManager::new(parent_dir) {
+                Ok(mut manager) => {
+                    // Update the file transfer metadata with the chosen filename
+                    let mut transfer_data = file_transfer.clone();
+                    transfer_data.filename = chosen_filename;
+
+                    match manager.start_receive(transfer_data) {
+                        Ok(_) => {
+                            self.file_transfer_manager = Some(manager);
+
+                            // Send acceptance to peer
+                            if let Some(ref conn) = self.connection {
+                                let transfer_id = file_transfer.transfer_id.clone();
+                                let conn = conn.clone();
+                                self.runtime.spawn(async move {
+                                    let conn = conn.lock().await;
+                                    let _ = conn.send(ClientMessage::AcknowledgeChunk(transfer_id, -1)).await;
+                                });
+                            }
+
+                            // Open file transfer panel to show progress
+                            self.show_file_transfer = true;
+                        }
+                        Err(e) => {
+                            self.state.error_message = Some(format!("Failed to accept file: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.state.error_message = Some(format!("Failed to initialize file transfer: {}", e));
+                }
+            }
+        }
+
+        self.pending_file_transfer = None;
+    }
+
+    fn reject_file_transfer(&mut self, file_transfer: &models::FileTransferData) {
+        if let Some(ref conn) = self.connection {
+            let transfer_id = file_transfer.transfer_id.clone();
+            let conn = conn.clone();
+            self.runtime.spawn(async move {
+                let conn = conn.lock().await;
+                let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+            });
+        }
+        self.pending_file_transfer = None;
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -689,6 +765,44 @@ impl eframe::App for RemoteDesktopApp {
                         }
                         if ui.button("Reject").clicked() {
                             self.reject_connection(requester_id);
+                        }
+                    });
+                });
+        }
+
+        // Pending file transfer dialog
+        if let Some(ref file_transfer) = self.pending_file_transfer.clone() {
+            egui::Window::new("Incoming File Transfer")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Peer wants to send you a file:");
+                    ui.add_space(5.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Filename:");
+                        ui.monospace(&file_transfer.filename);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Size:");
+                        let size_kb = file_transfer.file_size / 1024;
+                        let size_mb = size_kb / 1024;
+                        if size_mb > 0 {
+                            ui.label(format!("{:.2} MB", size_mb as f64 + (size_kb % 1024) as f64 / 1024.0));
+                        } else {
+                            ui.label(format!("{} KB", size_kb));
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Accept").clicked() {
+                            self.accept_file_transfer(file_transfer);
+                        }
+                        if ui.button("Reject").clicked() {
+                            self.reject_file_transfer(file_transfer);
                         }
                     });
                 });
