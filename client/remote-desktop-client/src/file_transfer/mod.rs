@@ -124,7 +124,23 @@ impl FileTransferManager {
 
     /// Start receiving a file
     pub fn start_receive(&mut self, metadata: FileTransferData) -> Result<()> {
-        let file_path = self.download_dir.join(&metadata.filename);
+        // Sanitize filename - extract only the filename component, no paths allowed
+        let sanitized_filename = Path::new(&metadata.filename)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid or malicious filename: path traversal detected"))?;
+
+        // Additional validation: check for excessively long filenames
+        if sanitized_filename.len() > 255 {
+            return Err(anyhow::anyhow!("Filename too long (max 255 characters)"));
+        }
+
+        // Check for null bytes or other problematic characters
+        if sanitized_filename.contains('\0') {
+            return Err(anyhow::anyhow!("Invalid filename: contains null byte"));
+        }
+
+        let file_path = self.download_dir.join(sanitized_filename);
 
         self.incoming_transfers.insert(
             metadata.transfer_id.clone(),
