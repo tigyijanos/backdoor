@@ -1,4 +1,5 @@
 mod capture;
+mod file_transfer;
 mod input;
 mod models;
 mod network;
