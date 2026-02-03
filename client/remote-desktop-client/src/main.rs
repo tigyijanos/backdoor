@@ -6,6 +6,7 @@ mod network;
 
 use anyhow::Result;
 use eframe::egui;
+use file_transfer::FileTransferManager;
 use models::{AppState, ClientConfig, ConnectionHistoryEntry, ConnectionState, InputData, InputType};
 use network::{ClientMessage, RelayConnection, ReconnectionConfig as NetworkReconnectionConfig, ServerMessage};
 use std::sync::Arc;
@@ -47,7 +48,10 @@ struct RemoteDesktopApp {
     // Remote view
     remote_frame: Option<egui::TextureHandle>,
     frame_data: Option<models::FrameData>,
-    
+
+    // File transfer
+    file_transfer_manager: Option<FileTransferManager>,
+
     // Settings panel
     show_settings: bool,
 
@@ -72,6 +76,7 @@ impl RemoteDesktopApp {
             server_rx: None,
             remote_frame: None,
             frame_data: None,
+            file_transfer_manager: None,
             show_settings: false,
             show_connection_details: false,
         }
