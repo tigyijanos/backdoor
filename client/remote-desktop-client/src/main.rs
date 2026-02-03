@@ -6,7 +6,7 @@ mod network;
 use anyhow::Result;
 use eframe::egui;
 use models::{AppState, ClientConfig, ConnectionHistoryEntry, ConnectionState, InputData, InputType};
-use network::{ClientMessage, RelayConnection, ServerMessage};
+use network::{ClientMessage, RelayConnection, ReconnectionConfig as NetworkReconnectionConfig, ServerMessage};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -49,6 +49,9 @@ struct RemoteDesktopApp {
     
     // Settings panel
     show_settings: bool,
+
+    // Connection details panel
+    show_connection_details: bool,
 }
 
 impl RemoteDesktopApp {
@@ -69,6 +72,7 @@ impl RemoteDesktopApp {
             remote_frame: None,
             frame_data: None,
             show_settings: false,
+            show_connection_details: false,
         }
     }
 
@@ -83,15 +87,31 @@ impl RemoteDesktopApp {
 
         self.state.connection_state = ConnectionState::Connecting;
         self.state.error_message = None;
+        self.state.reconnection_attempt = 0;
+
+        // Convert model ReconnectionConfig to network ReconnectionConfig
+        let reconnect_config = NetworkReconnectionConfig {
+            max_attempts: self.config.reconnection_config.max_retries,
+            initial_delay_ms: self.config.reconnection_config.base_delay_ms,
+            max_delay_ms: self.config.reconnection_config.max_delay_ms,
+            backoff_multiplier: 2.0,
+        };
 
         let result = self.runtime.block_on(async {
-            RelayConnection::connect(&server_url).await
+            RelayConnection::connect_with_retry(&server_url, reconnect_config).await
         });
 
         match result {
             Ok((conn, rx)) => {
                 let conn = Arc::new(Mutex::new(conn));
-                
+
+                // Start heartbeat monitor
+                let conn_clone = conn.clone();
+                self.runtime.spawn(async move {
+                    let conn = conn_clone.lock().await;
+                    conn.start_heartbeat_monitor(5000); // 5 second intervals
+                });
+
                 // Register with server
                 let conn_clone = conn.clone();
                 let client_id_clone = client_id.clone();
@@ -104,6 +124,7 @@ impl RemoteDesktopApp {
                 self.connection = Some(conn);
                 self.server_rx = Some(rx);
                 self.state.connection_state = ConnectionState::Connected;
+                self.state.last_connection_time = Some(chrono::Local::now().timestamp());
             }
             Err(e) => {
                 self.state.error_message = Some(format!("Connection failed: {}", e));
@@ -191,6 +212,148 @@ impl RemoteDesktopApp {
         }
     }
 
+    fn check_connection_health(&mut self) {
+        // Only check if we have a connection
+        if let Some(ref conn) = self.connection {
+            let conn_clone = conn.clone();
+            let state = self.state.connection_state.clone();
+
+            // Only monitor if we're supposed to be connected
+            if state == ConnectionState::Connected || state == ConnectionState::InSession {
+                let is_healthy = self.runtime.block_on(async {
+                    conn_clone.lock().await.is_healthy().await
+                });
+
+                // If connection is unhealthy and we're not already reconnecting, trigger reconnection
+                if !is_healthy && self.state.connection_state != ConnectionState::Reconnecting {
+                    log::warn!("Connection unhealthy, initiating reconnection");
+                    self.state.error_message = Some("Connection lost - Network interruption detected".to_string());
+                    self.attempt_reconnection();
+                }
+            }
+        }
+    }
+
+    fn attempt_reconnection(&mut self) {
+        // Don't attempt if already reconnecting or if we've exceeded max attempts
+        if self.state.connection_state == ConnectionState::Reconnecting {
+            return;
+        }
+
+        if self.state.reconnection_attempt >= self.config.reconnection_config.max_retries {
+            self.state.error_message = Some(format!(
+                "Connection failed - Unable to reconnect after {} attempts",
+                self.config.reconnection_config.max_retries
+            ));
+            self.state.connection_state = ConnectionState::Disconnected;
+            self.connection = None;
+            self.server_rx = None;
+            return;
+        }
+
+        // Store current session state
+        let peer_before_reconnect = self.state.current_peer.clone();
+
+        self.state.connection_state = ConnectionState::Reconnecting;
+        self.state.reconnection_attempt += 1;
+
+        // Update notification message for the attempt
+        self.state.error_message = Some(format!(
+            "Attempting to reconnect (attempt {}/{})",
+            self.state.reconnection_attempt,
+            self.config.reconnection_config.max_retries
+        ));
+
+        let server_url = self.config.server_url.clone();
+        let client_id = self.config.client_id.clone();
+        let password = self.config.password.clone();
+
+        // Convert model ReconnectionConfig to network ReconnectionConfig
+        let reconnect_config = NetworkReconnectionConfig {
+            max_attempts: self.config.reconnection_config.max_retries - self.state.reconnection_attempt,
+            initial_delay_ms: self.config.reconnection_config.base_delay_ms,
+            max_delay_ms: self.config.reconnection_config.max_delay_ms,
+            backoff_multiplier: 2.0,
+        };
+
+        let result = self.runtime.block_on(async {
+            RelayConnection::connect_with_retry(&server_url, reconnect_config).await
+        });
+
+        match result {
+            Ok((conn, rx)) => {
+                let conn = Arc::new(Mutex::new(conn));
+
+                // Start heartbeat monitor
+                let conn_clone = conn.clone();
+                self.runtime.spawn(async move {
+                    let conn = conn_clone.lock().await;
+                    conn.start_heartbeat_monitor(5000);
+                });
+
+                // Register with server
+                let conn_clone = conn.clone();
+                let client_id_clone = client_id.clone();
+                let password_clone = password.clone();
+                self.runtime.spawn(async move {
+                    let conn = conn_clone.lock().await;
+                    let _ = conn.send(ClientMessage::Register(client_id_clone, password_clone)).await;
+                });
+
+                self.connection = Some(conn);
+                self.server_rx = Some(rx);
+
+                // Restore connection state
+                if peer_before_reconnect.is_some() {
+                    self.state.connection_state = ConnectionState::InSession;
+                    self.state.current_peer = peer_before_reconnect;
+                } else {
+                    self.state.connection_state = ConnectionState::Connected;
+                }
+
+                self.state.last_connection_time = Some(chrono::Local::now().timestamp());
+
+                // Success notification with details
+                let success_msg = if peer_before_reconnect.is_some() {
+                    format!(
+                        "Reconnected successfully after {} attempt(s) - Session restored",
+                        self.state.reconnection_attempt
+                    )
+                } else {
+                    format!(
+                        "Reconnected successfully after {} attempt(s)",
+                        self.state.reconnection_attempt
+                    )
+                };
+                self.state.error_message = Some(success_msg);
+
+                // Reset reconnection counter on success
+                self.state.reconnection_attempt = 0;
+            }
+            Err(e) => {
+                log::error!("Reconnection attempt {} failed: {}", self.state.reconnection_attempt, e);
+
+                // If we've exceeded max attempts, give up
+                if self.state.reconnection_attempt >= self.config.reconnection_config.max_retries {
+                    self.state.error_message = Some(format!(
+                        "Connection failed - Unable to reconnect after {} attempts. Reason: {}",
+                        self.state.reconnection_attempt,
+                        e
+                    ));
+                    self.state.connection_state = ConnectionState::Disconnected;
+                    self.connection = None;
+                    self.server_rx = None;
+                } else {
+                    self.state.error_message = Some(format!(
+                        "Reconnection attempt {} failed ({}), retrying...",
+                        self.state.reconnection_attempt,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
     fn process_server_messages(&mut self) {
         // Collect messages first to avoid borrow issues
         let messages: Vec<_> = if let Some(ref mut rx) = self.server_rx {
@@ -255,6 +418,9 @@ impl eframe::App for RemoteDesktopApp {
         // Process incoming messages
         self.process_server_messages();
 
+        // Check connection health periodically
+        self.check_connection_health();
+
         // Request repaint for live updates
         ctx.request_repaint();
 
@@ -262,9 +428,18 @@ impl eframe::App for RemoteDesktopApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Remote Desktop");
+
+                // Connection status indicator
+                ui.separator();
+                let (status_color, status_icon, status_text) = self.get_connection_status_indicator();
+                ui.colored_label(status_color, format!("{} {}", status_icon, status_text));
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙ Settings").clicked() {
                         self.show_settings = !self.show_settings;
+                    }
+                    if ui.button("ℹ Details").clicked() {
+                        self.show_connection_details = !self.show_connection_details;
                     }
                 });
             });
@@ -311,6 +486,84 @@ impl eframe::App for RemoteDesktopApp {
                 });
         }
 
+        // Connection details window
+        if self.show_connection_details {
+            egui::Window::new("Connection Details")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Status:");
+                        let (color, icon, text) = self.get_connection_status_indicator();
+                        ui.colored_label(color, format!("{} {}", icon, text));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Server:");
+                        ui.monospace(&self.config.server_url);
+                    });
+
+                    if let Some(last_time) = self.state.last_connection_time {
+                        let now = chrono::Local::now().timestamp();
+                        let uptime_secs = now - last_time;
+                        let uptime_str = if uptime_secs < 60 {
+                            format!("{} seconds", uptime_secs)
+                        } else if uptime_secs < 3600 {
+                            format!("{} minutes", uptime_secs / 60)
+                        } else {
+                            format!("{} hours {} minutes", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+                        };
+
+                        ui.horizontal(|ui| {
+                            ui.label("Uptime:");
+                            ui.label(uptime_str);
+                        });
+                    }
+
+                    if let Some(ref peer) = self.state.current_peer {
+                        ui.horizontal(|ui| {
+                            ui.label("Connected to:");
+                            ui.monospace(peer);
+                        });
+                    }
+
+                    ui.separator();
+
+                    ui.heading("Reconnection Settings");
+                    ui.horizontal(|ui| {
+                        ui.label("Max retries:");
+                        ui.label(self.config.reconnection_config.max_retries.to_string());
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Base delay:");
+                        ui.label(format!("{} ms", self.config.reconnection_config.base_delay_ms));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Max delay:");
+                        ui.label(format!("{} ms", self.config.reconnection_config.max_delay_ms));
+                    });
+
+                    if self.state.reconnection_attempt > 0 {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Reconnection attempts:");
+                            ui.label(format!("{}/{}",
+                                self.state.reconnection_attempt,
+                                self.config.reconnection_config.max_retries
+                            ));
+                        });
+                    }
+
+                    ui.add_space(10.0);
+
+                    if ui.button("Close").clicked() {
+                        self.show_connection_details = false;
+                    }
+                });
+        }
+
         // Pending connection request dialog
         if let Some(ref requester_id) = self.state.pending_request.clone() {
             egui::Window::new("Connection Request")
@@ -332,6 +585,43 @@ impl eframe::App for RemoteDesktopApp {
 
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Reconnection notification banner
+            if self.state.connection_state == ConnectionState::Reconnecting {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(255, 200, 100))
+                    .inner_margin(egui::style::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.colored_label(
+                                egui::Color32::BLACK,
+                                format!(
+                                    "🔄 Reconnecting... (attempt {}/{})",
+                                    self.state.reconnection_attempt,
+                                    self.config.reconnection_config.max_retries
+                                )
+                            );
+                        });
+                    });
+                ui.add_space(5.0);
+            }
+
+            // Connection restored success notification
+            if let Some(ref error) = self.state.error_message {
+                if error.contains("Reconnected successfully") {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(200, 255, 200))
+                        .inner_margin(egui::style::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0, 100, 0),
+                                format!("✓ {}", error)
+                            );
+                        });
+                    ui.add_space(5.0);
+                }
+            }
+
             match self.state.connection_state {
                 ConnectionState::Disconnected => {
                     self.render_disconnected_view(ui);
@@ -340,6 +630,16 @@ impl eframe::App for RemoteDesktopApp {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
                         ui.label("Connecting...");
+                    });
+                }
+                ConnectionState::Reconnecting => {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Reconnecting... (attempt {}/{})",
+                            self.state.reconnection_attempt,
+                            self.config.reconnection_config.max_retries
+                        ));
                     });
                 }
                 ConnectionState::Connected => {
@@ -352,7 +652,15 @@ impl eframe::App for RemoteDesktopApp {
 
             // Error message
             if let Some(ref error) = self.state.error_message {
-                ui.colored_label(egui::Color32::RED, error);
+                // Only show error message if it's not a success notification
+                if !error.contains("Reconnected successfully") {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(255, 220, 220))
+                        .inner_margin(egui::style::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(egui::Color32::from_rgb(150, 0, 0), format!("⚠ {}", error));
+                        });
+                }
             }
         });
     }
@@ -512,6 +820,26 @@ impl RemoteDesktopApp {
                 let conn = conn.lock().await;
                 let _ = conn.send(ClientMessage::SendInput(input)).await;
             });
+        }
+    }
+
+    fn get_connection_status_indicator(&self) -> (egui::Color32, &str, &str) {
+        match self.state.connection_state {
+            ConnectionState::Disconnected => {
+                (egui::Color32::from_rgb(180, 180, 180), "⚫", "Disconnected")
+            }
+            ConnectionState::Connecting => {
+                (egui::Color32::from_rgb(255, 165, 0), "🟡", "Connecting")
+            }
+            ConnectionState::Connected => {
+                (egui::Color32::from_rgb(0, 200, 0), "🟢", "Connected")
+            }
+            ConnectionState::Reconnecting => {
+                (egui::Color32::from_rgb(255, 140, 0), "🟠", "Reconnecting")
+            }
+            ConnectionState::InSession => {
+                (egui::Color32::from_rgb(0, 150, 255), "🔵", "In Session")
+            }
         }
     }
 }

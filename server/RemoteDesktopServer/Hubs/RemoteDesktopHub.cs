@@ -43,8 +43,34 @@ public class RemoteDesktopHub : Hub
     public async Task<bool> Register(string clientId, string? password)
     {
         _logger.LogInformation("Client registering: {ClientId}", clientId);
+
+        // Register client - ClientManager will restore session if within grace period
         _clientManager.RegisterClient(clientId, Context.ConnectionId, password);
-        await Clients.Caller.SendAsync("Registered", clientId);
+
+        // Check if this was a reconnection with session restoration
+        var client = _clientManager.GetClientByClientId(clientId);
+        if (client?.ConnectedToClientId != null)
+        {
+            // Session was restored - notify both parties
+            _logger.LogInformation("Session restored for {ClientId}, connected to {PeerId}",
+                clientId, client.ConnectedToClientId);
+
+            // Notify the reconnecting client
+            await Clients.Caller.SendAsync("ReconnectionSuccessful", client.ConnectedToClientId);
+
+            // Notify the peer that the session resumed
+            var peer = _clientManager.GetClientByClientId(client.ConnectedToClientId);
+            if (peer != null && peer.IsOnline)
+            {
+                await Clients.Client(peer.ConnectionId).SendAsync("SessionRestored", clientId);
+            }
+        }
+        else
+        {
+            // Normal registration without session restoration
+            await Clients.Caller.SendAsync("Registered", clientId);
+        }
+
         return true;
     }
 

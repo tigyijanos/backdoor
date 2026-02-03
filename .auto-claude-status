@@ -1,0 +1,25 @@
+{
+  "active": true,
+  "spec": "002-connection-reliability-improvements",
+  "state": "building",
+  "subtasks": {
+    "completed": 8,
+    "total": 15,
+    "in_progress": 1,
+    "failed": 0
+  },
+  "phase": {
+    "current": "UI Connection Status Indicators",
+    "id": null,
+    "total": 3
+  },
+  "workers": {
+    "active": 0,
+    "max": 1
+  },
+  "session": {
+    "number": 10,
+    "started_at": "2026-02-03T13:43:06.021292"
+  },
+  "last_update": "2026-02-03T14:09:26.372951"
+}

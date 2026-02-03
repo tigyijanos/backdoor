@@ -5,6 +5,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services
 builder.Services.AddSingleton<IClientManager, ClientManager>();
+builder.Services.AddHostedService<SessionCleanupService>();
 
 // Add SignalR with MessagePack for better performance
 builder.Services.AddSignalR(options =>

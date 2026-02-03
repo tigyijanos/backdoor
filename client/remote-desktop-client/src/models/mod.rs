@@ -7,6 +7,7 @@ pub struct ClientConfig {
     pub password: Option<String>,
     pub server_url: String,
     pub connection_history: Vec<ConnectionHistoryEntry>,
+    pub reconnection_config: ReconnectionConfig,
 }
 
 impl Default for ClientConfig {
@@ -16,6 +17,25 @@ impl Default for ClientConfig {
             password: None,
             server_url: "http://localhost:5000".to_string(),
             connection_history: Vec::new(),
+            reconnection_config: ReconnectionConfig::default(),
+        }
+    }
+}
+
+/// Reconnection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconnectionConfig {
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl Default for ReconnectionConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 10,
+            base_delay_ms: 2000,
+            max_delay_ms: 30000,
         }
     }
 }
@@ -71,6 +91,7 @@ pub enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
+    Reconnecting,
     InSession,
 }
 
@@ -81,6 +102,8 @@ pub struct AppState {
     pub current_peer: Option<String>,
     pub error_message: Option<String>,
     pub pending_request: Option<String>,
+    pub last_connection_time: Option<i64>,
+    pub reconnection_attempt: u32,
 }
 
 impl Default for AppState {
@@ -90,6 +113,8 @@ impl Default for AppState {
             current_peer: None,
             error_message: None,
             pending_request: None,
+            last_connection_time: None,
+            reconnection_attempt: 0,
         }
     }
 }
