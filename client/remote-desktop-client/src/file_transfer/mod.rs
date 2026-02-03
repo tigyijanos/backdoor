@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::models::{FileChunk, FileTransferData};
 
@@ -24,6 +25,8 @@ struct OutgoingTransfer {
     metadata: FileTransferData,
     chunks_sent: usize,
     acknowledged_chunks: HashSet<i32>,
+    started_at: Instant,
+    bytes_transferred: u64,
 }
 
 /// State of an incoming file transfer
@@ -31,6 +34,8 @@ struct IncomingTransfer {
     metadata: FileTransferData,
     received_chunks: HashMap<i32, Vec<u8>>,
     file_path: PathBuf,
+    started_at: Instant,
+    bytes_transferred: u64,
 }
 
 impl FileTransferManager {
@@ -75,6 +80,8 @@ impl FileTransferManager {
                 metadata: transfer_data.clone(),
                 chunks_sent: 0,
                 acknowledged_chunks: HashSet::new(),
+                started_at: Instant::now(),
+                bytes_transferred: 0,
             },
         );
 
@@ -148,6 +155,8 @@ impl FileTransferManager {
                 metadata,
                 received_chunks: HashMap::new(),
                 file_path,
+                started_at: Instant::now(),
+                bytes_transferred: 0,
             },
         );
 
@@ -166,6 +175,9 @@ impl FileTransferManager {
         if calculated_checksum != chunk.checksum {
             return Err(anyhow::anyhow!("Checksum mismatch for chunk {}", chunk.chunk_index));
         }
+
+        // Track bytes transferred
+        transfer.bytes_transferred += chunk.data.len() as u64;
 
         transfer.received_chunks.insert(chunk.chunk_index, chunk.data);
 
@@ -210,6 +222,10 @@ impl FileTransferManager {
             .ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
 
         transfer.acknowledged_chunks.insert(chunk_index);
+
+        // Track bytes transferred
+        transfer.bytes_transferred += CHUNK_SIZE as u64;
+
         Ok(())
     }
 
@@ -240,6 +256,52 @@ impl FileTransferManager {
     /// Get the download directory path
     pub fn download_dir(&self) -> &Path {
         &self.download_dir
+    }
+
+    /// Get list of active outgoing transfers with their metadata and progress
+    pub fn get_outgoing_transfers(&self) -> Vec<(String, FileTransferData, f32)> {
+        self.outgoing_transfers
+            .iter()
+            .map(|(id, transfer)| {
+                let progress = transfer.acknowledged_chunks.len() as f32 / transfer.metadata.total_chunks as f32;
+                (id.clone(), transfer.metadata.clone(), progress)
+            })
+            .collect()
+    }
+
+    /// Get list of active incoming transfers with their metadata and progress
+    pub fn get_incoming_transfers(&self) -> Vec<(String, FileTransferData, f32)> {
+        self.incoming_transfers
+            .iter()
+            .map(|(id, transfer)| {
+                let progress = transfer.received_chunks.len() as f32 / transfer.metadata.total_chunks as f32;
+                (id.clone(), transfer.metadata.clone(), progress)
+            })
+            .collect()
+    }
+
+    /// Get transfer speed in bytes per second for an outgoing transfer
+    pub fn get_send_speed(&self, transfer_id: &str) -> Option<f64> {
+        self.outgoing_transfers.get(transfer_id).map(|transfer| {
+            let elapsed = transfer.started_at.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                transfer.bytes_transferred as f64 / elapsed
+            } else {
+                0.0
+            }
+        })
+    }
+
+    /// Get transfer speed in bytes per second for an incoming transfer
+    pub fn get_receive_speed(&self, transfer_id: &str) -> Option<f64> {
+        self.incoming_transfers.get(transfer_id).map(|transfer| {
+            let elapsed = transfer.started_at.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                transfer.bytes_transferred as f64 / elapsed
+            } else {
+                0.0
+            }
+        })
     }
 }
 

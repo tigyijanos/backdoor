@@ -852,13 +852,96 @@ impl eframe::App for RemoteDesktopApp {
                     ui.heading("File Transfer Queue");
                     ui.separator();
 
-                    // Check if we have active transfers
-                    let has_transfers = false; // TODO: Check actual transfers when manager is active
+                    let mut has_transfers = false;
 
-                    if has_transfers {
-                        // TODO: Display active transfers here
-                        ui.label("Active transfers will be shown here");
-                    } else {
+                    // Display outgoing transfers
+                    if let Some(ref manager) = self.file_transfer_manager {
+                        let outgoing = manager.get_outgoing_transfers();
+                        let incoming = manager.get_incoming_transfers();
+
+                        for (transfer_id, metadata, progress) in outgoing.iter() {
+                            has_transfers = true;
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("📤");
+                                    ui.vertical(|ui| {
+                                        ui.label(format!("Sending: {}", metadata.filename));
+
+                                        // Progress bar
+                                        let progress_bar = egui::ProgressBar::new(*progress)
+                                            .text(format!("{:.1}%", progress * 100.0));
+                                        ui.add(progress_bar);
+
+                                        // Speed indicator
+                                        if let Some(speed) = manager.get_send_speed(transfer_id) {
+                                            let speed_text = format_speed(speed);
+                                            ui.label(format!("Speed: {}", speed_text));
+                                        }
+                                    });
+
+                                    // Cancel button
+                                    if ui.button("✖").clicked() {
+                                        if let Some(ref mut mgr) = self.file_transfer_manager {
+                                            mgr.cancel_send(transfer_id);
+                                        }
+                                        // Send cancellation message to peer
+                                        if let Some(ref conn) = self.connection {
+                                            let id = transfer_id.clone();
+                                            let conn = conn.clone();
+                                            self.runtime.spawn(async move {
+                                                let conn = conn.lock().await;
+                                                let _ = conn.send(ClientMessage::CancelFileTransfer(id)).await;
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                            ui.add_space(5.0);
+                        }
+
+                        // Display incoming transfers
+                        for (transfer_id, metadata, progress) in incoming.iter() {
+                            has_transfers = true;
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("📥");
+                                    ui.vertical(|ui| {
+                                        ui.label(format!("Receiving: {}", metadata.filename));
+
+                                        // Progress bar
+                                        let progress_bar = egui::ProgressBar::new(*progress)
+                                            .text(format!("{:.1}%", progress * 100.0));
+                                        ui.add(progress_bar);
+
+                                        // Speed indicator
+                                        if let Some(speed) = manager.get_receive_speed(transfer_id) {
+                                            let speed_text = format_speed(speed);
+                                            ui.label(format!("Speed: {}", speed_text));
+                                        }
+                                    });
+
+                                    // Cancel button
+                                    if ui.button("✖").clicked() {
+                                        if let Some(ref mut mgr) = self.file_transfer_manager {
+                                            mgr.cancel_receive(transfer_id);
+                                        }
+                                        // Send cancellation message to peer
+                                        if let Some(ref conn) = self.connection {
+                                            let id = transfer_id.clone();
+                                            let conn = conn.clone();
+                                            self.runtime.spawn(async move {
+                                                let conn = conn.lock().await;
+                                                let _ = conn.send(ClientMessage::CancelFileTransfer(id)).await;
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                            ui.add_space(5.0);
+                        }
+                    }
+
+                    if !has_transfers {
                         ui.vertical_centered(|ui| {
                             ui.add_space(20.0);
                             ui.colored_label(
@@ -1192,6 +1275,17 @@ impl RemoteDesktopApp {
                 (egui::Color32::from_rgb(0, 150, 255), "🔵", "In Session")
             }
         }
+    }
+}
+
+/// Helper function to format transfer speed
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec < 1024.0 {
+        format!("{:.0} B/s", bytes_per_sec)
+    } else if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
     }
 }
 
