@@ -57,6 +57,9 @@ struct RemoteDesktopApp {
 
     // Connection details panel
     show_connection_details: bool,
+
+    // File transfer panel
+    show_file_transfer: bool,
 }
 
 impl RemoteDesktopApp {
@@ -79,6 +82,7 @@ impl RemoteDesktopApp {
             file_transfer_manager: None,
             show_settings: false,
             show_connection_details: false,
+            show_file_transfer: false,
         }
     }
 
@@ -447,6 +451,9 @@ impl eframe::App for RemoteDesktopApp {
                     if ui.button("ℹ Details").clicked() {
                         self.show_connection_details = !self.show_connection_details;
                     }
+                    if ui.button("📁 Files").clicked() {
+                        self.show_file_transfer = !self.show_file_transfer;
+                    }
                 });
             });
         });
@@ -566,6 +573,41 @@ impl eframe::App for RemoteDesktopApp {
 
                     if ui.button("Close").clicked() {
                         self.show_connection_details = false;
+                    }
+                });
+        }
+
+        // File transfer window
+        if self.show_file_transfer {
+            egui::Window::new("File Transfers")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    ui.heading("File Transfer Queue");
+                    ui.separator();
+
+                    // Check if we have active transfers
+                    let has_transfers = false; // TODO: Check actual transfers when manager is active
+
+                    if has_transfers {
+                        // TODO: Display active transfers here
+                        ui.label("Active transfers will be shown here");
+                    } else {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.colored_label(
+                                egui::Color32::from_rgb(128, 128, 128),
+                                "No active file transfers"
+                            );
+                            ui.add_space(20.0);
+                        });
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Close").clicked() {
+                        self.show_file_transfer = false;
                     }
                 });
         }
