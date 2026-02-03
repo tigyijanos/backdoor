@@ -118,3 +118,29 @@ impl Default for AppState {
         }
     }
 }
+
+/// File transfer metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTransferData {
+    #[serde(rename = "transferId")]
+    pub transfer_id: String,
+    #[serde(rename = "filename")]
+    pub filename: String,
+    #[serde(rename = "fileSize")]
+    pub file_size: i64,
+    #[serde(rename = "totalChunks")]
+    pub total_chunks: i32,
+}
+
+/// File chunk data for transfer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunk {
+    #[serde(rename = "transferId")]
+    pub transfer_id: String,
+    #[serde(rename = "chunkIndex")]
+    pub chunk_index: i32,
+    #[serde(rename = "data")]
+    pub data: Vec<u8>,
+    #[serde(rename = "checksum")]
+    pub checksum: String,
+}

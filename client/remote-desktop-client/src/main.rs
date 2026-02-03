@@ -1,10 +1,12 @@
 mod capture;
+mod file_transfer;
 mod input;
 mod models;
 mod network;
 
 use anyhow::Result;
 use eframe::egui;
+use file_transfer::FileTransferManager;
 use models::{AppState, ClientConfig, ConnectionHistoryEntry, ConnectionState, InputData, InputType};
 use network::{ClientMessage, RelayConnection, ReconnectionConfig as NetworkReconnectionConfig, ServerMessage};
 use std::sync::Arc;
@@ -46,12 +48,19 @@ struct RemoteDesktopApp {
     // Remote view
     remote_frame: Option<egui::TextureHandle>,
     frame_data: Option<models::FrameData>,
-    
+
+    // File transfer
+    file_transfer_manager: Option<FileTransferManager>,
+    pending_file_transfer: Option<models::FileTransferData>,
+
     // Settings panel
     show_settings: bool,
 
     // Connection details panel
     show_connection_details: bool,
+
+    // File transfer panel
+    show_file_transfer: bool,
 }
 
 impl RemoteDesktopApp {
@@ -71,8 +80,11 @@ impl RemoteDesktopApp {
             server_rx: None,
             remote_frame: None,
             frame_data: None,
+            file_transfer_manager: None,
+            pending_file_transfer: None,
             show_settings: false,
             show_connection_details: false,
+            show_file_transfer: false,
         }
     }
 
@@ -405,8 +417,268 @@ impl RemoteDesktopApp {
                         let _ = handler.process_input(&input);
                     });
                 }
+                ServerMessage::InitiateFileTransfer(file_transfer) => {
+                    self.pending_file_transfer = Some(file_transfer);
+                }
+                ServerMessage::ReceiveFileChunk(chunk) => {
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        match manager.receive_chunk(chunk.clone()) {
+                            Ok(is_complete) => {
+                                // Send acknowledgement for this chunk
+                                if let Some(ref conn) = self.connection {
+                                    let transfer_id = chunk.transfer_id.clone();
+                                    let chunk_index = chunk.chunk_index;
+                                    let conn = conn.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::AcknowledgeChunk(transfer_id.clone(), chunk_index)).await;
+
+                                        // If complete, send completion message
+                                        if is_complete {
+                                            let _ = conn.send(ClientMessage::CompleteFileTransfer(transfer_id)).await;
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                self.state.error_message = Some(format!("Failed to receive chunk: {}", e));
+
+                                // Cancel the transfer on error
+                                if let Some(ref conn) = self.connection {
+                                    let transfer_id = chunk.transfer_id.clone();
+                                    let conn = conn.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                ServerMessage::AcknowledgeChunk(transfer_id, chunk_index) => {
+                    // Handle acknowledgement of sent chunk
+                    if chunk_index == -1 {
+                        // Initial acknowledgement - peer accepted the transfer, start sending chunks
+                        if let Some(ref mut manager) = self.file_transfer_manager {
+                            match manager.get_next_chunk(&transfer_id) {
+                                Ok(Some(chunk)) => {
+                                    if let Some(ref conn) = self.connection {
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::SendFileChunk(chunk)).await;
+                                        });
+                                    }
+                                }
+                                Ok(None) => {
+                                    // No chunks to send (shouldn't happen on initial ack)
+                                    log::warn!("No chunks available for transfer {}", transfer_id);
+                                }
+                                Err(e) => {
+                                    self.state.error_message = Some(format!("Failed to get chunk: {}", e));
+                                }
+                            }
+                        }
+                    } else {
+                        // Acknowledgement for a sent chunk - record acknowledgement and send next chunk
+                        if let Some(ref mut manager) = self.file_transfer_manager {
+                            // Record that this chunk was acknowledged
+                            if let Err(e) = manager.acknowledge_chunk(&transfer_id, chunk_index) {
+                                log::error!("Failed to acknowledge chunk {}: {}", chunk_index, e);
+                            }
+
+                            match manager.get_next_chunk(&transfer_id) {
+                                Ok(Some(chunk)) => {
+                                    if let Some(ref conn) = self.connection {
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::SendFileChunk(chunk)).await;
+                                        });
+                                    }
+                                }
+                                Ok(None) => {
+                                    // All chunks sent - send completion message
+                                    if let Some(ref conn) = self.connection {
+                                        let transfer_id = transfer_id.clone();
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::CompleteFileTransfer(transfer_id)).await;
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    self.state.error_message = Some(format!("Failed to get chunk: {}", e));
+
+                                    // Cancel the transfer on error
+                                    if let Some(ref conn) = self.connection {
+                                        let transfer_id = transfer_id.clone();
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ServerMessage::CompleteFileTransfer(transfer_id) => {
+                    // Clean up the transfer from manager
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        manager.cancel_send(&transfer_id);
+                        manager.cancel_receive(&transfer_id);
+                    }
+                    log::info!("File transfer {} completed successfully", transfer_id);
+                }
+                ServerMessage::CancelFileTransfer(transfer_id) => {
+                    // Cancel the transfer
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        let was_sending = manager.cancel_send(&transfer_id);
+                        let was_receiving = manager.cancel_receive(&transfer_id);
+
+                        if was_sending || was_receiving {
+                            self.state.error_message = Some("File transfer was cancelled".to_string());
+                        }
+                    }
+                    log::info!("File transfer {} cancelled", transfer_id);
+                }
                 ServerMessage::Error(err) => {
                     self.state.error_message = Some(err);
+                }
+            }
+        }
+    }
+
+    fn accept_file_transfer(&mut self, file_transfer: &models::FileTransferData) {
+        // Show save file dialog
+        let default_filename = file_transfer.filename.clone();
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_filename)
+            .save_file()
+        {
+            // Get the parent directory and filename from the selected path
+            let parent_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+                directories::UserDirs::new()
+                    .and_then(|dirs| dirs.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("downloads"))
+            });
+
+            let chosen_filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&default_filename)
+                .to_string();
+
+            // Initialize file transfer manager with the chosen directory
+            match FileTransferManager::new(parent_dir) {
+                Ok(mut manager) => {
+                    // Update the file transfer metadata with the chosen filename
+                    let mut transfer_data = file_transfer.clone();
+                    transfer_data.filename = chosen_filename;
+
+                    match manager.start_receive(transfer_data) {
+                        Ok(_) => {
+                            self.file_transfer_manager = Some(manager);
+
+                            // Send acceptance to peer
+                            if let Some(ref conn) = self.connection {
+                                let transfer_id = file_transfer.transfer_id.clone();
+                                let conn = conn.clone();
+                                self.runtime.spawn(async move {
+                                    let conn = conn.lock().await;
+                                    let _ = conn.send(ClientMessage::AcknowledgeChunk(transfer_id, -1)).await;
+                                });
+                            }
+
+                            // Open file transfer panel to show progress
+                            self.show_file_transfer = true;
+                        }
+                        Err(e) => {
+                            self.state.error_message = Some(format!("Failed to accept file: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.state.error_message = Some(format!("Failed to initialize file transfer: {}", e));
+                }
+            }
+        }
+
+        self.pending_file_transfer = None;
+    }
+
+    fn reject_file_transfer(&mut self, file_transfer: &models::FileTransferData) {
+        if let Some(ref conn) = self.connection {
+            let transfer_id = file_transfer.transfer_id.clone();
+            let conn = conn.clone();
+            self.runtime.spawn(async move {
+                let conn = conn.lock().await;
+                let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+            });
+        }
+        self.pending_file_transfer = None;
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        // Only allow file drops during an active session
+        if self.state.connection_state != ConnectionState::InSession {
+            return;
+        }
+
+        // Get dropped files from context
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+
+        if !dropped_files.is_empty() {
+            // Initialize file transfer manager if not already done
+            if self.file_transfer_manager.is_none() {
+                let download_dir = directories::UserDirs::new()
+                    .and_then(|dirs| dirs.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("downloads"));
+
+                match FileTransferManager::new(download_dir) {
+                    Ok(manager) => {
+                        self.file_transfer_manager = Some(manager);
+                    }
+                    Err(e) => {
+                        self.state.error_message = Some(format!("Failed to initialize file transfer: {}", e));
+                        return;
+                    }
+                }
+            }
+
+            // Process each dropped file
+            for file in dropped_files {
+                if let Some(path) = &file.path {
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        // Start the file transfer
+                        match manager.start_send(path.clone()) {
+                            Ok(file_transfer_data) => {
+                                // Send InitiateFileTransfer message to peer
+                                if let Some(ref conn) = self.connection {
+                                    let conn = conn.clone();
+                                    let data = file_transfer_data.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::InitiateFileTransfer(data)).await;
+                                    });
+                                }
+
+                                // Open file transfer panel to show progress
+                                self.show_file_transfer = true;
+                            }
+                            Err(e) => {
+                                let filename = path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                self.state.error_message = Some(format!("Failed to queue file {}: {}", filename, e));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -420,6 +692,9 @@ impl eframe::App for RemoteDesktopApp {
 
         // Check connection health periodically
         self.check_connection_health();
+
+        // Handle drag-and-drop file selection
+        self.handle_dropped_files(ctx);
 
         // Request repaint for live updates
         ctx.request_repaint();
@@ -440,6 +715,9 @@ impl eframe::App for RemoteDesktopApp {
                     }
                     if ui.button("ℹ Details").clicked() {
                         self.show_connection_details = !self.show_connection_details;
+                    }
+                    if ui.button("📁 Files").clicked() {
+                        self.show_file_transfer = !self.show_file_transfer;
                     }
                 });
             });
@@ -564,6 +842,124 @@ impl eframe::App for RemoteDesktopApp {
                 });
         }
 
+        // File transfer window
+        if self.show_file_transfer {
+            egui::Window::new("File Transfers")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    ui.heading("File Transfer Queue");
+                    ui.separator();
+
+                    let mut has_transfers = false;
+
+                    // Display outgoing transfers
+                    if let Some(ref manager) = self.file_transfer_manager {
+                        let outgoing = manager.get_outgoing_transfers();
+                        let incoming = manager.get_incoming_transfers();
+
+                        for (transfer_id, metadata, progress) in outgoing.iter() {
+                            has_transfers = true;
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("📤");
+                                    ui.vertical(|ui| {
+                                        ui.label(format!("Sending: {}", metadata.filename));
+
+                                        // Progress bar
+                                        let progress_bar = egui::ProgressBar::new(*progress)
+                                            .text(format!("{:.1}%", progress * 100.0));
+                                        ui.add(progress_bar);
+
+                                        // Speed indicator
+                                        if let Some(speed) = manager.get_send_speed(transfer_id) {
+                                            let speed_text = format_speed(speed);
+                                            ui.label(format!("Speed: {}", speed_text));
+                                        }
+                                    });
+
+                                    // Cancel button
+                                    if ui.button("✖").clicked() {
+                                        if let Some(ref mut mgr) = self.file_transfer_manager {
+                                            mgr.cancel_send(transfer_id);
+                                        }
+                                        // Send cancellation message to peer
+                                        if let Some(ref conn) = self.connection {
+                                            let id = transfer_id.clone();
+                                            let conn = conn.clone();
+                                            self.runtime.spawn(async move {
+                                                let conn = conn.lock().await;
+                                                let _ = conn.send(ClientMessage::CancelFileTransfer(id)).await;
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                            ui.add_space(5.0);
+                        }
+
+                        // Display incoming transfers
+                        for (transfer_id, metadata, progress) in incoming.iter() {
+                            has_transfers = true;
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("📥");
+                                    ui.vertical(|ui| {
+                                        ui.label(format!("Receiving: {}", metadata.filename));
+
+                                        // Progress bar
+                                        let progress_bar = egui::ProgressBar::new(*progress)
+                                            .text(format!("{:.1}%", progress * 100.0));
+                                        ui.add(progress_bar);
+
+                                        // Speed indicator
+                                        if let Some(speed) = manager.get_receive_speed(transfer_id) {
+                                            let speed_text = format_speed(speed);
+                                            ui.label(format!("Speed: {}", speed_text));
+                                        }
+                                    });
+
+                                    // Cancel button
+                                    if ui.button("✖").clicked() {
+                                        if let Some(ref mut mgr) = self.file_transfer_manager {
+                                            mgr.cancel_receive(transfer_id);
+                                        }
+                                        // Send cancellation message to peer
+                                        if let Some(ref conn) = self.connection {
+                                            let id = transfer_id.clone();
+                                            let conn = conn.clone();
+                                            self.runtime.spawn(async move {
+                                                let conn = conn.lock().await;
+                                                let _ = conn.send(ClientMessage::CancelFileTransfer(id)).await;
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                            ui.add_space(5.0);
+                        }
+                    }
+
+                    if !has_transfers {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.colored_label(
+                                egui::Color32::from_rgb(128, 128, 128),
+                                "No active file transfers"
+                            );
+                            ui.add_space(20.0);
+                        });
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Close").clicked() {
+                        self.show_file_transfer = false;
+                    }
+                });
+        }
+
         // Pending connection request dialog
         if let Some(ref requester_id) = self.state.pending_request.clone() {
             egui::Window::new("Connection Request")
@@ -578,6 +974,44 @@ impl eframe::App for RemoteDesktopApp {
                         }
                         if ui.button("Reject").clicked() {
                             self.reject_connection(requester_id);
+                        }
+                    });
+                });
+        }
+
+        // Pending file transfer dialog
+        if let Some(ref file_transfer) = self.pending_file_transfer.clone() {
+            egui::Window::new("Incoming File Transfer")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Peer wants to send you a file:");
+                    ui.add_space(5.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Filename:");
+                        ui.monospace(&file_transfer.filename);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Size:");
+                        let size_kb = file_transfer.file_size / 1024;
+                        let size_mb = size_kb / 1024;
+                        if size_mb > 0 {
+                            ui.label(format!("{:.2} MB", size_mb as f64 + (size_kb % 1024) as f64 / 1024.0));
+                        } else {
+                            ui.label(format!("{} KB", size_kb));
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Accept").clicked() {
+                            self.accept_file_transfer(file_transfer);
+                        }
+                        if ui.button("Reject").clicked() {
+                            self.reject_file_transfer(file_transfer);
                         }
                     });
                 });
@@ -841,6 +1275,17 @@ impl RemoteDesktopApp {
                 (egui::Color32::from_rgb(0, 150, 255), "🔵", "In Session")
             }
         }
+    }
+}
+
+/// Helper function to format transfer speed
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec < 1024.0 {
+        format!("{:.0} B/s", bytes_per_sec)
+    } else if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
     }
 }
 
