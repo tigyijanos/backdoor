@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ struct OutgoingTransfer {
     file_path: PathBuf,
     metadata: FileTransferData,
     chunks_sent: usize,
+    acknowledged_chunks: HashSet<i32>,
 }
 
 /// State of an incoming file transfer
@@ -73,6 +74,7 @@ impl FileTransferManager {
                 file_path,
                 metadata: transfer_data.clone(),
                 chunks_sent: 0,
+                acknowledged_chunks: HashSet::new(),
             },
         );
 
@@ -86,13 +88,22 @@ impl FileTransferManager {
             .get_mut(transfer_id)
             .ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
 
-        let chunk_index = transfer.chunks_sent as i32;
-        if chunk_index >= transfer.metadata.total_chunks {
-            return Ok(None);
+        // Find the next unacknowledged chunk
+        let mut chunk_index = None;
+        for i in 0..transfer.metadata.total_chunks {
+            if !transfer.acknowledged_chunks.contains(&i) {
+                chunk_index = Some(i);
+                break;
+            }
         }
 
+        let chunk_index = match chunk_index {
+            Some(idx) => idx,
+            None => return Ok(None), // All chunks acknowledged
+        };
+
         let mut file = File::open(&transfer.file_path)?;
-        let offset = transfer.chunks_sent * CHUNK_SIZE;
+        let offset = (chunk_index as usize) * CHUNK_SIZE;
         let mut buffer = vec![0u8; CHUNK_SIZE];
 
         file.seek(std::io::SeekFrom::Start(offset as u64))?;
@@ -101,7 +112,7 @@ impl FileTransferManager {
 
         let checksum = calculate_checksum(&buffer);
 
-        transfer.chunks_sent += 1;
+        transfer.chunks_sent = transfer.chunks_sent.max(chunk_index as usize + 1);
 
         Ok(Some(FileChunk {
             transfer_id: transfer_id.to_string(),
@@ -175,10 +186,21 @@ impl FileTransferManager {
         Ok(())
     }
 
+    /// Acknowledge a chunk that was successfully received by the peer
+    pub fn acknowledge_chunk(&mut self, transfer_id: &str, chunk_index: i32) -> Result<()> {
+        let transfer = self
+            .outgoing_transfers
+            .get_mut(transfer_id)
+            .ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
+
+        transfer.acknowledged_chunks.insert(chunk_index);
+        Ok(())
+    }
+
     /// Get the progress of an outgoing transfer (0.0 to 1.0)
     pub fn get_send_progress(&self, transfer_id: &str) -> Option<f32> {
         self.outgoing_transfers.get(transfer_id).map(|transfer| {
-            transfer.chunks_sent as f32 / transfer.metadata.total_chunks as f32
+            transfer.acknowledged_chunks.len() as f32 / transfer.metadata.total_chunks as f32
         })
     }
 

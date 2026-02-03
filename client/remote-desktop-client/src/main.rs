@@ -481,8 +481,13 @@ impl RemoteDesktopApp {
                             }
                         }
                     } else {
-                        // Acknowledgement for a sent chunk - send next chunk if available
+                        // Acknowledgement for a sent chunk - record acknowledgement and send next chunk
                         if let Some(ref mut manager) = self.file_transfer_manager {
+                            // Record that this chunk was acknowledged
+                            if let Err(e) = manager.acknowledge_chunk(&transfer_id, chunk_index) {
+                                log::error!("Failed to acknowledge chunk {}: {}", chunk_index, e);
+                            }
+
                             match manager.get_next_chunk(&transfer_id) {
                                 Ok(Some(chunk)) => {
                                     if let Some(ref conn) = self.connection {
