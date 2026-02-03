@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, interval};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::models::{FrameData, InputData};
+use crate::models::{FrameData, InputData, FileTransferData, FileChunk};
 
 /// Messages from server to client
 #[derive(Debug, Clone)]
@@ -20,6 +20,11 @@ pub enum ServerMessage {
     PeerDisconnected,
     ReceiveFrame(FrameData),
     ReceiveInput(InputData),
+    InitiateFileTransfer(FileTransferData),
+    ReceiveFileChunk(FileChunk),
+    AcknowledgeChunk(String, i32),
+    CompleteFileTransfer(String),
+    CancelFileTransfer(String),
     Error(String),
 }
 
@@ -32,6 +37,11 @@ pub enum ClientMessage {
     RejectConnection(String),
     SendFrame(FrameData),
     SendInput(InputData),
+    InitiateFileTransfer(FileTransferData),
+    SendFileChunk(FileChunk),
+    AcknowledgeChunk(String, i32),
+    CompleteFileTransfer(String),
+    CancelFileTransfer(String),
     Heartbeat,
     DisconnectSession,
 }
@@ -194,6 +204,41 @@ impl RelayConnection {
                             "arguments": [input]
                         })
                     }
+                    ClientMessage::InitiateFileTransfer(file_transfer) => {
+                        json!({
+                            "type": 1,
+                            "target": "InitiateFileTransfer",
+                            "arguments": [file_transfer]
+                        })
+                    }
+                    ClientMessage::SendFileChunk(chunk) => {
+                        json!({
+                            "type": 1,
+                            "target": "SendFileChunk",
+                            "arguments": [chunk]
+                        })
+                    }
+                    ClientMessage::AcknowledgeChunk(transfer_id, chunk_index) => {
+                        json!({
+                            "type": 1,
+                            "target": "AcknowledgeChunk",
+                            "arguments": [transfer_id, chunk_index]
+                        })
+                    }
+                    ClientMessage::CompleteFileTransfer(transfer_id) => {
+                        json!({
+                            "type": 1,
+                            "target": "CompleteFileTransfer",
+                            "arguments": [transfer_id]
+                        })
+                    }
+                    ClientMessage::CancelFileTransfer(transfer_id) => {
+                        json!({
+                            "type": 1,
+                            "target": "CancelFileTransfer",
+                            "arguments": [transfer_id]
+                        })
+                    }
                     ClientMessage::Heartbeat => {
                         json!({
                             "type": 1,
@@ -260,6 +305,37 @@ impl RelayConnection {
                                         args.and_then(|a| a.first())
                                             .and_then(|v| serde_json::from_value(v.clone()).ok())
                                             .map(ServerMessage::ReceiveInput)
+                                    }
+                                    "InitiateFileTransfer" => {
+                                        args.and_then(|a| a.first())
+                                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                            .map(ServerMessage::InitiateFileTransfer)
+                                    }
+                                    "ReceiveFileChunk" => {
+                                        args.and_then(|a| a.first())
+                                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                            .map(ServerMessage::ReceiveFileChunk)
+                                    }
+                                    "AcknowledgeChunk" => {
+                                        args.and_then(|a| {
+                                            if a.len() >= 2 {
+                                                let transfer_id = a[0].as_str().map(String::from)?;
+                                                let chunk_index = a[1].as_i64().map(|i| i as i32)?;
+                                                Some(ServerMessage::AcknowledgeChunk(transfer_id, chunk_index))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    }
+                                    "CompleteFileTransfer" => {
+                                        args.and_then(|a| a.first())
+                                            .and_then(|v| v.as_str())
+                                            .map(|id| ServerMessage::CompleteFileTransfer(id.to_string()))
+                                    }
+                                    "CancelFileTransfer" => {
+                                        args.and_then(|a| a.first())
+                                            .and_then(|v| v.as_str())
+                                            .map(|id| ServerMessage::CancelFileTransfer(id.to_string()))
                                     }
                                     _ => None,
                                 };
