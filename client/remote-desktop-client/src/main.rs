@@ -421,6 +421,66 @@ impl RemoteDesktopApp {
             }
         }
     }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        // Only allow file drops during an active session
+        if self.state.connection_state != ConnectionState::InSession {
+            return;
+        }
+
+        // Get dropped files from context
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+
+        if !dropped_files.is_empty() {
+            // Initialize file transfer manager if not already done
+            if self.file_transfer_manager.is_none() {
+                let download_dir = directories::UserDirs::new()
+                    .and_then(|dirs| dirs.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("downloads"));
+
+                match FileTransferManager::new(download_dir) {
+                    Ok(manager) => {
+                        self.file_transfer_manager = Some(manager);
+                    }
+                    Err(e) => {
+                        self.state.error_message = Some(format!("Failed to initialize file transfer: {}", e));
+                        return;
+                    }
+                }
+            }
+
+            // Process each dropped file
+            for file in dropped_files {
+                if let Some(path) = &file.path {
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        // Start the file transfer
+                        match manager.start_send(path.clone()) {
+                            Ok(file_transfer_data) => {
+                                // Send InitiateFileTransfer message to peer
+                                if let Some(ref conn) = self.connection {
+                                    let conn = conn.clone();
+                                    let data = file_transfer_data.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::InitiateFileTransfer(data)).await;
+                                    });
+                                }
+
+                                // Open file transfer panel to show progress
+                                self.show_file_transfer = true;
+                            }
+                            Err(e) => {
+                                let filename = path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                self.state.error_message = Some(format!("Failed to queue file {}: {}", filename, e));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for RemoteDesktopApp {
@@ -430,6 +490,9 @@ impl eframe::App for RemoteDesktopApp {
 
         // Check connection health periodically
         self.check_connection_health();
+
+        // Handle drag-and-drop file selection
+        self.handle_dropped_files(ctx);
 
         // Request repaint for live updates
         ctx.request_repaint();

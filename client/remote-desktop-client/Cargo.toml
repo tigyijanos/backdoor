@@ -48,6 +48,9 @@ enigo = "0.1"
 # Time
 chrono = "0.4"
 
+# Cryptography
+sha2 = "0.10"
+
 [profile.release]
 lto = true
 codegen-units = 1
