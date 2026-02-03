@@ -420,6 +420,127 @@ impl RemoteDesktopApp {
                 ServerMessage::InitiateFileTransfer(file_transfer) => {
                     self.pending_file_transfer = Some(file_transfer);
                 }
+                ServerMessage::ReceiveFileChunk(chunk) => {
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        match manager.receive_chunk(chunk.clone()) {
+                            Ok(is_complete) => {
+                                // Send acknowledgement for this chunk
+                                if let Some(ref conn) = self.connection {
+                                    let transfer_id = chunk.transfer_id.clone();
+                                    let chunk_index = chunk.chunk_index;
+                                    let conn = conn.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::AcknowledgeChunk(transfer_id.clone(), chunk_index)).await;
+
+                                        // If complete, send completion message
+                                        if is_complete {
+                                            let _ = conn.send(ClientMessage::CompleteFileTransfer(transfer_id)).await;
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                self.state.error_message = Some(format!("Failed to receive chunk: {}", e));
+
+                                // Cancel the transfer on error
+                                if let Some(ref conn) = self.connection {
+                                    let transfer_id = chunk.transfer_id.clone();
+                                    let conn = conn.clone();
+                                    self.runtime.spawn(async move {
+                                        let conn = conn.lock().await;
+                                        let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                ServerMessage::AcknowledgeChunk(transfer_id, chunk_index) => {
+                    // Handle acknowledgement of sent chunk
+                    if chunk_index == -1 {
+                        // Initial acknowledgement - peer accepted the transfer, start sending chunks
+                        if let Some(ref mut manager) = self.file_transfer_manager {
+                            match manager.get_next_chunk(&transfer_id) {
+                                Ok(Some(chunk)) => {
+                                    if let Some(ref conn) = self.connection {
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::SendFileChunk(chunk)).await;
+                                        });
+                                    }
+                                }
+                                Ok(None) => {
+                                    // No chunks to send (shouldn't happen on initial ack)
+                                    log::warn!("No chunks available for transfer {}", transfer_id);
+                                }
+                                Err(e) => {
+                                    self.state.error_message = Some(format!("Failed to get chunk: {}", e));
+                                }
+                            }
+                        }
+                    } else {
+                        // Acknowledgement for a sent chunk - send next chunk if available
+                        if let Some(ref mut manager) = self.file_transfer_manager {
+                            match manager.get_next_chunk(&transfer_id) {
+                                Ok(Some(chunk)) => {
+                                    if let Some(ref conn) = self.connection {
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::SendFileChunk(chunk)).await;
+                                        });
+                                    }
+                                }
+                                Ok(None) => {
+                                    // All chunks sent - send completion message
+                                    if let Some(ref conn) = self.connection {
+                                        let transfer_id = transfer_id.clone();
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::CompleteFileTransfer(transfer_id)).await;
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    self.state.error_message = Some(format!("Failed to get chunk: {}", e));
+
+                                    // Cancel the transfer on error
+                                    if let Some(ref conn) = self.connection {
+                                        let transfer_id = transfer_id.clone();
+                                        let conn = conn.clone();
+                                        self.runtime.spawn(async move {
+                                            let conn = conn.lock().await;
+                                            let _ = conn.send(ClientMessage::CancelFileTransfer(transfer_id)).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ServerMessage::CompleteFileTransfer(transfer_id) => {
+                    // Clean up the transfer from manager
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        manager.cancel_send(&transfer_id);
+                        manager.cancel_receive(&transfer_id);
+                    }
+                    log::info!("File transfer {} completed successfully", transfer_id);
+                }
+                ServerMessage::CancelFileTransfer(transfer_id) => {
+                    // Cancel the transfer
+                    if let Some(ref mut manager) = self.file_transfer_manager {
+                        let was_sending = manager.cancel_send(&transfer_id);
+                        let was_receiving = manager.cancel_receive(&transfer_id);
+
+                        if was_sending || was_receiving {
+                            self.state.error_message = Some("File transfer was cancelled".to_string());
+                        }
+                    }
+                    log::info!("File transfer {} cancelled", transfer_id);
+                }
                 ServerMessage::Error(err) => {
                     self.state.error_message = Some(err);
                 }
